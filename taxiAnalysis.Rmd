@@ -1,0 +1,351 @@
+---
+title: "NYC Taxi Analysis"
+author: "Lawrence May"
+date: "22/08/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(leaps)
+library(leaflet)
+library(forcats)
+library(rgdal)
+library(sp)
+
+taxi <- read_csv("/Users/lawrence/Desktop/assignment 2/week2.csv")
+
+ taxi <- taxi %>%
+   mutate(dropoff_datetime = tpep_dropoff_datetime,
+          pickup_datetime = tpep_pickup_datetime, 
+         dow = wday(pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),                          
+          hour_trip_start = factor(hour(pickup_datetime)),                                    
+          trip_duration = as.numeric(difftime(dropoff_datetime,pickup_datetime,units="mins")),     
+          payment_type_label = fct_recode(factor(payment_type),  
+                                         "Credit Card"="1", 
+                                          "Cash"="2", 
+                                          "No Charge"="3", 
+                                          "Other"="4"), 
+          .keep=c("unused"))
+```
+
+```{r}
+# look at trip counts by day of week
+taxi %>% ggplot( aes(x=dow)) + geom_bar()
+```
+
+Plot for daily pattern
+```{r}
+ taxi %>% ggplot(aes(x=dow,y=tip_amount)) + geom_boxplot()
+```
+
+It appears as if most taxi trips are taken on Saturdays, however some of the highest number of tips are being paid on Fridays and Sundays. This could potentially be due to drunk people being a bit more generous when it comes to tips? Also there appear to be some negative tips which will need to be filtered out. 
+
+Filter out implausible and likely errornous observations, only payments made by Credit Card contain useful tip information:
+
+```{r}
+ taxi <- taxi %>%
+   filter(trip_duration < 120, trip_duration > 0, fare_amount >= 0, passenger_count > 0, extra >= 0, tip_amount >= 0)  
+ #Filter out trips that took less than no time at all and longer than 2 hours, fares smaller than 0 and fares without any passengers as well as negative tips. 
+#Filters only trips paid by Credit card, as cash tips are not recorded
+
+#taxi<-taxi[taxi$payment_type_label=="Credit Card",]
+ #MTA tax and improvement surcharge same for all trips -> meaningless 
+ taxi <- taxi %>% select(-c(total_amount,mta_tax,improvement_surcharge,payment_type_label)) 
+
+ 
+ #Creates categorical pickup time variable 
+ taxi <- taxi %>% mutate(pickup_time = as.factor(ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 8:17, "Weekend - Daytime",
+                                      ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 8:17, "Weekday - Daytime", 
+                                   ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 3:7, "Weekday - EarlyMorning", 
+                                       ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 3:7, "Weekend - EarlyMorning",
+                                      ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 18:21, "Weekend - Evening", 
+                                       ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 18:21, "Weekday - Evening",                                        ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% c(22,23,0,1,2), "Weekend - LateNight",                                                 "Weekday - LateNight"))))))))) 
+
+taxi <- taxi %>% select(-c(dropoff_datetime,pickup_datetime,hour_trip_start,dow)) #Information all stored in categorical pickup_time variable 
+``` 
+
+ Looking at pickup and dropoff locations: 
+
+```{r} 
+# take a small subset so we can plot quickly -->
+sm_taxi <- taxi %>% sample_n(1e4) 
+   # plot on a map 
+leaflet(sm_taxi) %>%  
+   addTiles() %>%  
+  addCircleMarkers(~pickup_longitude,~pickup_latitude, radius=2,stroke = FALSE, opacity=1, fillOpacity =1) 
+```
+
+There to appear to be some taxi trips that started in the cap verdian islands, they are certainly not correct and will need to be filtered out. 
+
+```{r} 
+ #There appear to be some weird outliers, need to filter out -->
+ ## Use a simple bounding box for the NY area and filter #:https://www1.nyc.gov/assets/planning/download/pdf/data-maps/open-data/nybb_metadata.pdf?ver=20b -->
+ min_lat <- 40.495992 
+max_lat <- 40.915568 
+ min_long <- -74.257159 
+ max_long <- -73.699215 
+ taxi <- taxi %>% filter(pickup_longitude > min_long, pickup_longitude < max_long, pickup_latitude > min_lat, pickup_latitude < max_lat) 
+  
+
+ #Thanks Lisa! 
+# source: https://data.cityofnewyork.us/City-Government/Borough-Boundaries/tqmj-j8zm)
+  # get shapefile (as map layer) download and unzip to a folder. 
+# nyc.shp <- readOGR('/Users/lawrence/Google Drive/UNI/current/Stats 369/assignment 2/Borough Boundaries')   
+# 
+#  #Pickup 
+#  mydf <- structure(list( 
+#    longitude = taxi$pickup_longitude, # use pickup point as example. 
+#    latitude = taxi$pickup_latitude), 
+#    .Names = c('longitude', 'latitude'), 
+#   class = 'data.frame', 
+#    row.names = c(NA, nrow(taxi))) 
+# 
+# 
+#  xy <- mydf[,c(1,2)] 
+#  spdf <- SpatialPointsDataFrame(coords = xy, 
+#                              data = mydf, 
+#                               proj4string = CRS(proj4string(nyc.shp))) 
+# 
+#  # overlay
+#  results <- over(spdf, nyc.shp) # NA = unmatched/outside polygon 
+# 
+#  taxi$pickup_loc <- results$boro_name  #Add to taxi df 
+# 
+# 
+#  #Dropoff 
+#  mydf2 <- structure(list( 
+#    longitude = taxi$dropoff_longitude, # use pickup point as example. 
+#    latitude = taxi$dropoff_latitude), 
+#    .Names = c('longitude', 'latitude'), 
+#    class = 'data.frame',
+#    row.names = c(NA, nrow(taxi))
+#  ) 
+# 
+# xy <- mydf2[,c(1,2)]
+# spdf2 <- SpatialPointsDataFrame(coords = xy, 
+#                               data = mydf2,
+#                             proj4string = CRS(proj4string(nyc.shp)))
+
+#results <- over(spdf2, nyc.shp) # NA = unmatched/outside polygon
+
+#taxi$dropoff_loc <- results$boro_name
+
+#taxi <- taxi %>% select(-c(pickup_longitude,pickup_latitude,dropoff_longitude,dropoff_latitude))
+```
+
+
+```{r}
+# taxi$pickup_loc<-as.factor(taxi$pickup_loc)
+# taxi$dropoff_loc<-as.factor(taxi$dropoff_loc)
+# 
+# taxi$pickup_loc<- taxi$pickup_loc %>% fct_explicit_na(na_level = 'OutsideNYC')   #Replace NA with OutsideNYC
+# taxi$dropoff_loc<- taxi$dropoff_loc %>% fct_explicit_na(na_level = 'OutsideNYC')
+
+fit <- lm(tip_amount ~ ., data= taxi)
+summary(fit)
+```
+Most variables appear to be significant (with the exception of Weekday Evening and Weekday Night, which apparently aren't significantly different from the Weekday daytime baseline variable). The simple linear model is quite good at explaining the data, which an R^2 value of 0.56.
+
+Fitting a cross validated model
+
+```{r}
+mf<-model.frame(tip_amount~.^2, data=taxi)
+X<-model.matrix(tip_amount~.^2, mf)[,-1]
+
+
+subsets1.reg = regsubsets(X, taxi$tip_amount, nvmax = 50, method = "backward")
+subsets1.summary = summary(subsets1.reg)
+apparentErrors = subsets1.summary$rss / (nrow(taxi) - 1:50)
+qplot(y = apparentErrors, x= 1:50)
+```
+Apparent error tends to go down the more predictive variables are added, not surprisingly. 
+
+
+Get allyhat function from xvalcode
+```{r}
+allyhat<-function(xtrain, ytrain, xtest,lambdas,nvmax=50){
+  n<-nrow(xtrain)
+  yhat<-matrix(nrow=nrow(xtest),ncol=length(lambdas))
+  search<-regsubsets(xtrain,ytrain, nvmax=nvmax, method="back")
+  summ<-summary(search)
+  for(i in 1:length(lambdas)){
+    penMSE<- n*log(summ$rss)+lambdas[i]*(1:nvmax)
+    best<-which.min(penMSE)  #lowest AIC
+    betahat<-coef(search, best) #coefficients
+    xinmodel<-cbind(1,xtest)[,summ$which[best,]] #predictors in that model
+    yhat[,i]<-xinmodel%*%betahat
+  }
+  yhat
+}
+```
+
+```{r}
+y = taxi$tip_amount
+n<-nrow(X)
+folds<-sample(rep(1:10,length.out=n))
+lam<-c(1,10,50,200,4000)
+fitted<-matrix(nrow=n,ncol=length(lam))
+for(k in 1:10){
+  train<- (1:n)[folds!=k]
+  test<-(1:n)[folds==k]
+  fitted[test,]<-allyhat(X[train,],y[train],X[test,],lam,nvmax = 50)
+}
+colMeans((y-fitted)^2)
+```
+
+A penalty of lambda=1 appears to minimize MSPE, therefore I will will use lambda = 1 for my final model.
+
+
+Importing and cleaning test set
+
+```{r}
+taxi.test <- read_csv("/Users/lawrence/Desktop/assignment 2/week4.csv")
+
+taxi.test <- taxi.test %>%
+  mutate(dropoff_datetime = tpep_dropoff_datetime,
+         pickup_datetime = tpep_pickup_datetime,
+         dow = wday(pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),
+         hour_trip_start = factor(hour(pickup_datetime)),
+         trip_duration = as.numeric(difftime(dropoff_datetime,pickup_datetime,units="mins")),
+         payment_type_label = fct_recode(factor(payment_type),
+                                         "Credit Card"="1",
+                                         "Cash"="2",
+                                         "No Charge"="3",
+                                         "Other"="4"),
+         .keep=c("unused")) %>%
+  filter(trip_duration < 120, trip_duration > 0, fare_amount >= 0, passenger_count > 0, extra >= 0, trip_distance <= max(taxi$trip_distance)) #Filter out trips that took less than no time at all and longer than 2 hours, fares smaller than 0 and fares without any passengers
+#Filters only trips paid by Credit card, as cash tips are not recorded
+
+#Creates categorical pickup time variable
+taxi.test <- taxi.test %>% mutate(pickup_time = as.factor(ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 8:17, "Weekend - Daytime",
+                                      ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 8:17, "Weekday - Daytime",
+                                    ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 3:7, "Weekday - EarlyMorning",
+                                      ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 3:7, "Weekend - EarlyMorning",
+                                      ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% 18:21, "Weekend - Evening",
+                                      ifelse(dow %in% c("Mon","Tue","Wed","Thu","Fri") & hour_trip_start %in% 18:21, "Weekday - Evening",
+                                      ifelse(dow %in% c("Sat","Sun") & hour_trip_start %in% c(22,23,0,1,2), "Weekend - LateNight",                                                 "Weekday - LateNight")))))))))
+
+#taxi.test<-taxi.test[taxi.test$payment_type_label=="Credit Card",]
+
+taxi.test <- taxi.test %>% select(-c(total_amount,mta_tax,improvement_surcharge,payment_type_label,dropoff_datetime,pickup_datetime,dow,hour_trip_start)) #Information all stored in categorical pickup_time
+
+taxi.test <- taxi.test %>% filter(pickup_longitude > min_long, pickup_longitude < max_long, pickup_latitude > min_lat, pickup_latitude < max_lat)
+
+# #Pickup
+# mydf <- structure(list(
+#   longitude = taxi.test$pickup_longitude, # use pickup point as example.
+#   latitude = taxi.test$pickup_latitude),
+#   .Names = c('longitude', 'latitude'),
+#   class = 'data.frame',
+#   row.names = c(NA, nrow(taxi.test))
+# )
+# 
+# 
+# xy <- mydf[,c(1,2)]
+# spdf <- SpatialPointsDataFrame(coords = xy, 
+#                                data = mydf,
+#                                proj4string = CRS(proj4string(nyc.shp)))
+# 
+# # overlay
+# results <- over(spdf, nyc.shp) # NA = unmatched/outside polygon
+# 
+# taxi.test$pickup_loc <- results$boro_name  #Add to taxi df
+# 
+# 
+# #Dropoff
+# mydf2 <- structure(list(
+#   longitude = taxi.test$dropoff_longitude, # use pickup point as example.
+#   latitude = taxi.test$dropoff_latitude),
+#   .Names = c('longitude', 'latitude'),
+#   class = 'data.frame',
+#   row.names = c(NA, nrow(taxi.test))
+# )
+# 
+# xy <- mydf2[,c(1,2)]
+# spdf2 <- SpatialPointsDataFrame(coords = xy, 
+#                                data = mydf2,
+#                                proj4string = CRS(proj4string(nyc.shp)))
+# 
+# # overlay
+# results <- over(spdf2, nyc.shp) # NA = unmatched/outside polygon
+
+#taxi.test$dropoff_loc <- results$boro_name
+#taxi.test <- taxi.test %>% select(-c(pickup_longitude,pickup_latitude,dropoff_longitude,dropoff_latitude))
+
+#taxi.test$pickup_loc<-as.factor(taxi.test$pickup_loc)
+#taxi.test$dropoff_loc<-as.factor(taxi.test$dropoff_loc)
+
+#taxi.test$pickup_loc<- taxi.test$pickup_loc %>% fct_explicit_na(na_level = 'OutsideNYC')   #Replace NA with OutsideNYC
+#taxi.test$dropoff_loc<- taxi.test$dropoff_loc %>% fct_explicit_na(na_level = 'OutsideNYC')
+
+y_txts<-taxi.test$tip_amount #Ys needed for testing true mspe
+```
+
+
+Building the final model using lambda = 1.
+
+```{r}
+lam = 1
+search = regsubsets(X, y, nvmax = 50, method = "backward")
+summ = summary(search)
+aic = nrow(X)*log(summ$rss)+lam*(1:50)
+best = which.min(aic)
+betahat = coef(search, best)
+```
+
+Most of the predictor variables in the final model are related to trip distance, fare amount, tolls and pickup or drop-off location. This is what would be expected, given that the tip is usually expected to be 15-20% of the fare it makes sense that is one of the most significant predictors. Same goes for distance, which is likely highly correlated with fare amount. Pickups and drop-offs in wealthier suburbs will are more likely to generate large tips than from poorer suburbs due to different clientele of course.
+
+
+Testing the model on the week4 taxi test set and evaluating true MSPE
+```{r}
+mf<-model.frame(tip_amount~.^2, data=taxi.test)
+Xfull<-model.matrix(tip_amount~.^2, mf)[,summ$which[best,]]
+fitted = Xfull%*%betahat
+
+MSPEfull = sum((y_txts - fitted)^2) / length(fitted)
+MSPEfull
+```
+
+The true unbiased MSPE is 4.9, slightly above the apparent error which was around 4.
+
+
+Report
+
+
+The first step in constructing the model was cleaning the data, which had a few outliers that were likely to be errors that were likely going to cause problems later on. Due to the large size of the data I decided to just remove these values as there were enough remaining observations that I was able to build the model with.
+These outliers were taxi trips that did not start in the geospatial coordinates that New York City is located in (some started somewhere in the Cape Verdian Islands according to the coordinates). I also decided to remove taxi trips that took longer than 2 hours or less than 0 hours, that had less than 1 passenger or that had a fare, tip or other charge smaller than zero. These were all likely to be error prone observations.
+
+I also decided to only use the taxi trips that were paid for by credit card as cash tips are not recorded and therefore we will not be able to use these for the predictive model.
+
+In addition to this, I decided to remove mta tax and the improvement surcharge as these are the same for every observation and therefore do not contain any useful information. I also removed the total amount variable as that is cheating knowing the full tip (i.e. in a real world scenario that would not be available information). I also removed the payment type label as I filtered it to only be trips paid by credit card.
+
+I also converted the time variables into factors as they will likely not have linear properties (i.e. the tip sizes on a Wednesday afternoon will likely not be too different to that on a Tuesday afternoon, while that on a Friday or Saturday night might be quite different however). I have therefore created a new variable pickup_time which is a factor with levels "Weekend - Daytime","Weekday - Daytime", "Weekday - EarlyMorning", "Weekend - EarlyMorning","Weekend - Evening","Weekday - Evening","Weekend - LateNight","Weekday - LateNight" to capture the similarities that 1am on a Friday night and 3am on a Saturday have compared to 2pm on a Monday and 3pm on a Thursday.
+
+EDIT: Unfortunately changing the geospatial data into categorical variables caused major problems with regsubsets, I have therefore decided to keep the spacial information in langitude and longitude form as that still will provide some information on tips (i.e. further North might have a different demographic than further South (e.g Bronx vs Staten Island)).
+(After filtering out all trips that did not start in the New York area I also decided to go with Lisa's suggestions (Thanks Lisa!) and converted the geospacial information into factors of which Borrough of New York the trip ended or finished, again because it will likely be meaningful to say a trip started in manhattan or the bronx compared to 48 degrees or 48.3 degrees latitude.)
+
+After cleaning the data, I used the regsubsets to determine the best fitting model with the best amount of predictors, which turned out to be with a penalty value lambda = 1, i.e. by including most predictive variables. Using cross-validation, I choose the model that minimized the Mean squared prediction error, which included the variables:
+
+```{r}
+betahat
+```
+
+Accuracy
+
+I believe a good measure for the accuracy of the model (i.e a good comparison for the MSPE) would be to compare the predictive performance of the model with a null-model of just the average tip in week 2 to predict week 4 tips. 
+
+```{r cache = TRUE}
+avg_tip=mean(taxi$tip_amount)
+MSPEnull = sum((y_txts - avg_tip)^2) / length(y_txts)
+MSPEnull
+```
+
+The fitted model is a significant improvement over the null model, therefore I am quite confident in its predictive accuracy as it almost halves the MSPE.
